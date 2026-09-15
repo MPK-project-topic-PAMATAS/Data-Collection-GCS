@@ -1,0 +1,65 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "stereo-dataset"
+version = "0.1.0"
+description = "Synchronized ZED 2 stereo + MTi-8 IMU + GNSS data acquisition pipeline"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "numpy",
+    "opencv-python",
+    "PySide6",
+    "pyqtgraph",
+    "pyarrow",
+    "pandas",
+    "h5py",
+    "scipy",
+    "pyserial",
+    "PyYAML",
+    "rosbags",
+    "matplotlib",
+    "psutil",
+]
+
+[project.optional-dependencies]
+test = ["pytest", "pytest-asyncio"]
+lidar = ["laspy", "ouster-sdk"]
+network = ["Flask", "requests", "zeroconf"]
+dev = ["Cython"]
+# dashboard/vehicle3d_panel.py's 3D vehicle-orientation view (falls back to
+# text display when this is missing — see that module's docstring).
+dashboard3d = ["PyOpenGL"]
+# dataset/pytorch_dataset.py's PyTorch Dataset adapter (optional; only
+# needed for training, not for recording/playback/validation).
+ml = ["torch"]
+# pyzed (ZED SDK) is not on PyPI; install from the local SDK wheel, e.g.:
+#   pip install /usr/local/zed/pyzed-5.4-cp312-cp312-linux_x86_64.whl
+
+[project.scripts]
+record = "run_gcs:main"
+playback = "playback:main"
+validate-dataset = "validate_dataset:main"
+synchronize-dataset = "synchronize_dataset:main"
+gcs = "run_gcs:main"
+
+[tool.setuptools]
+py-modules = ["main", "playback", "validate_dataset", "run_gcs", "synchronize_dataset"]
+packages = [
+    "camera",
+    "mti8",
+    "gnss",
+    "fusion",
+    "dataset",
+    "dashboard",
+    "calibration",
+    "config",
+    "tools",
+    "radar",
+    "lidar",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
