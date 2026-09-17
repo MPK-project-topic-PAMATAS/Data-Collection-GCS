@@ -1,125 +1,187 @@
-# Synchronization Model
+# Synchronization — Ground Control Station
 
-Synchronization is a **derived, offline operation** — it never gates recording.
-Every sensor is recorded independently at its own native rate; a missing camera
-frame never removes an MTi/radar/lidar/GNSS sample, and vice versa. The source
-of truth for live/preview matching is `fusion/synchronizer.py` and
-`fusion/synced_frame.py`; the source of truth for the derived, post-recording
-index is `fusion/offline_sync.py`.
+> **This document describes the live dashboard preview only.** Recording is
+> no longer gated on synchronization — every sensor (camera, MTi, radar,
+> lidar, GNSS) is recorded independently at its own native rate regardless of
+> whether it matches any other sensor. The authoritative description of the
+> current architecture, including the offline/derived synchronization step,
+> is `docs/SYNCHRONIZATION.md`; this file covers only how the live dashboard
+> computes its preview residual (`SyncedFrame`, `Synchronizer.sync()`).
 
-## Clock model
+How the GCS aligns the ZED 2 stereo camera, the MTi-8 IMU, and the GNSS
+receiver into a single preview data stream (`SyncedFrame`) for dashboard
+display — a separate, later, offline step aligns the actual recorded data
+(see `docs/SYNCHRONIZATION.md`).
 
-All sensors run on the **host monotonic clock** (`time.monotonic_ns()`) for
-every `timestamp_ns` field (camera, MTi, radar, lidar, GNSS). There is **no
-PTP and no hardware PPS/trigger implemented anywhere in this codebase** —
-matching that claim to reality is a hard requirement. Wall-clock (epoch) time
-is derived only where needed (filenames, ROS bag timestamps) via a captured
-`time.time_ns() - time.monotonic_ns()` offset, never used for matching itself.
-
-MTi additionally carries a **device clock** timestamp (`sample_time_fine` /
-`sample_time_coarse`, combined into `device_timestamp` in the HDF5 schema) —
-this is the Xsens IMU's own free-running clock, with an arbitrary epoch from
-device power-on and no rollover handling in this codebase. It is preserved
-alongside `packet_counter` and the host `timestamp_ns` but is **not** used for
-cross-sensor matching (there is no established mapping from the MTi's clock
-to the host's), and it is **not** a PPS/GPS-disciplined value — it is
-purely the device's own gyroscope-driven timer. GNSS carries a genuine
-sensor-reported time (`utc_time`/`gps_week`/`gps_tow` parsed from `$GPRMC`),
-which is likewise preserved but not used to discipline any other clock.
-
-The architecture leaves room for a future hardware PPS input without a
-redesign: it would arrive as one more explicit field (e.g.
-`pps_timestamp_ns`) alongside the existing device-clock/host-clock split,
-consumed the same way `device_timestamp` already is — documented, not
-claimed as implemented today.
-
-> Host `timestamp_ns` is authoritative for all matching. Never reconstruct
-> wall time from filenames — filenames are readability aids only.
-
-## Recording is per-sensor and native-rate
-
-Each sensor has its own recorder(s), started/stopped together by
-`run_gcs.py`'s `on_start()`/`on_stop()`, but running completely independently
-of one another once started:
-
-| Sensor | Raw/native recorder | Structured recorder | Independent of camera? |
-|--------|---------------------|----------------------|-------------------------|
-| ZED 2 | SVO2 (`camera.start_recording`) | depth/disparity/confidence NPY, `metadata/frames` | Camera *is* its own native rate |
-| MTi-8 | raw Xbus (`mti.start_raw_log`) | `MTiStructuredPoller` → HDF5, at ~200 Hz | Yes |
-| Radar (AWR1843) | ROS1 `.bag` (`RadarBagPoller`) | `RadarStructuredPoller` → JSON/heatmap/NPY + `metadata/radar` | Yes |
-| Lidar (Ouster) | one pcap + one config JSON (`lidar/receiver.py`, always independent) | scans decoded from the pcap offline, on demand (`dataset.reader.iter_lidar_frames`) — never pre-generated | Yes |
-| GNSS | raw NMEA log (`gnss.start_raw_log`) | `GNSSStructuredPoller` → `metadata/gnss` | Yes |
-
-See `DATASET_WRITER.md` for exact formats and paths.
-
-## Live/preview matching (`Synchronizer.sync()`)
-
-`AcquisitionThread` still calls `Synchronizer.sync(camera_frame)` on every
-camera grab, purely to compute a **dashboard preview** (`sync_error_ms`,
-live IMU/radar/lidar overlay values) and to fill two informational columns
-(`nearest_mti_timestamp_ns`, `sync_delta_ns`) on the camera's own
-`metadata/frames` row. Its result is never checked before writing anything —
-`AcquisitionThread` calls `writer.write_camera_frame(frame, synced)` for
-every recorded camera frame unconditionally, `synced` or not.
-
-Live matching tolerances (`config/settings.py`), used only for this preview:
-
-| Pair | Method | Tolerance | Default |
-|------|--------|-----------|---------|
-| Camera ↔ IMU (MTi-8) | `get_nearest` | `MAX_DELTA_NS` | 20 ms |
-| Camera ↔ Radar (AWR1843) | `get_nearest` | `RADAR_MAX_DELTA_NS` | 80 ms |
-| Camera ↔ Lidar (Ouster) | `get_nearest` | `LIDAR_MAX_DELTA_NS` | 50 ms |
-| GNSS | `latest()` (no match, not time-gated) | — | — |
-
-`Synchronizer.latest_lidar_frame()` bypasses even this preview gate for the
-live lidar dashboard view, same as before.
-
-## Offline synchronization (`fusion/offline_sync.py`)
-
-Run **after** recording stops (`synchronize-dataset <dataset_root>` CLI, or
-`fusion.offline_sync.synchronize_session(root)`), this reads the independent
-native-rate streams a session already wrote — `metadata/frames` (camera),
-`sensors/*.h5` (MTi), `metadata/radar` (radar), `metadata/gnss` (GNSS), and
-`<session_id>/raw/lidar.pcap` + `<session_id>/raw/lidar_0.json` (lidar — decoded on the fly, there is
-no per-frame lidar file) — and for every camera frame finds the nearest
-sample in each other modality via `np.searchsorted` over the complete
-recorded arrays, plus the residual:
+## Overview
 
 ```
-Δt_s = t_s - t_camera
+                 ┌──────────────────┐   serial/Xbus    ┌─────────────────────┐
+   MTi-8  ──────▶│  MTiReceiver     │──validated──────▶│ ring buffer         │
+   200 Hz        │  (thread)        │  samples         │ deque(maxlen=300)   │
+                 └──────────────────┘                  └──────────┬──────────┘
+                                                                  │ get_nearest()
+                 ┌──────────────────┐                             │
+   ZED 2  ──────▶│  ZEDCamera.grab()│── Frame ──┐                 │
+   ~15–30 fps    └──────────────────┘           ▼                 ▼
+                                              ┌─────────────────────────┐
+                 ┌──────────────────┐         │     Synchronizer.sync() │
+   GNSS   ──────▶│  GNSSReceiver    │─latest──▶│  match + 20 ms gate   │
+   1–10 Hz       │  (thread)        │  fix     └───────────┬─────────────┘
+                 └──────────────────┘                      │ SyncedFrame | None
+                                                           ▼
+                                            AcquisitionThread ──▶ DatasetWriter
+                                                           │
+                                                     SharedFrame snapshot
+                                                           ▼
+                                                      Qt dashboard
 ```
 
-Each row of the output (`metadata/synchronization/*.parquet`) carries
-`{modality}_timestamp_ns`, `dt_camera_{modality}_ns`, and
-`{modality}_in_tolerance` (bool, using the same tolerances as the live
-preview, plus `GNSS_MAX_DELTA_NS`). Rows outside tolerance are kept and
-flagged `False`, never dropped — synchronization quality is auditable, not
-hidden. Re-running this over the same session only appends more Parquet
-parts; it never modifies or deletes the native per-sensor streams it reads.
+Camera drives the pipeline. Every camera grab triggers one synchronization
+attempt; IMU and GNSS run on their own background threads and are read,
+never waited on.
 
-## `SyncedFrame` (live-preview container only)
+## Time base
 
-`fusion/synced_frame.py` — used exclusively by `Synchronizer.sync()` for the
-dashboard preview described above; it has no role in what actually reaches
-disk any more.
+**All matching happens in the monotonic clock domain (`time.monotonic_ns()`).**
+There is no PTP and no hardware PPS/trigger implemented anywhere in this
+codebase — see `docs/SYNCHRONIZATION.md` for the full clock-domain
+discussion, including the MTi's own device-clock fields
+(`sample_time_fine`/`sample_time_coarse`) which are preserved but not used
+for matching.
 
-| Field | Type | Meaning |
-|-------|------|---------|
-| `camera` | `dataset.Frame` | source camera frame |
-| `imu` | `mti8.MTiFrame` | nearest validated MTi-8 sample |
-| `camera_timestamp_ns` / `imu_timestamp_ns` / `delta_ns` | int | preview match |
-| `gnss` | `GNSSData` | latest GNSS fix (best-effort) |
-| `radar` / `lidar` | `RadarData` / `LidarData` | matched preview data (empty when unmatched) |
-| `frame_uuid` | str | unique id set by `AcquisitionThread` |
+| Source      | Stamp taken at                                   | Where                              |
+|-------------|--------------------------------------------------|------------------------------------|
+| ZED frame   | immediately after a successful SDK grab          | `camera/zed_camera.py` (`grab()`)  |
+| MTi sample  | packet arrival time, after Xbus decode           | `mti8/receiver.py` (`_loop()`)     |
+| GNSS fix    | arrival time of last NMEA sentence (kept in fix dict) | `gnss/receiver.py`            |
 
-## Drop / gap bookkeeping
+Each camera frame additionally records `wall_timestamp_ns` (`time.time_ns()`).
+The monotonic domain is used because it is immune to NTP/UTC step changes;
+the wall-clock pair is used later to translate matched IMU stamps back to UTC
+for persistence (see [Persistence](#persistence)).
 
-Packet/frame sequence gaps are counted, never silently absorbed:
+There is **no hardware trigger or PTP** between devices — this is software
+timestamping at arrival. The 20 ms acceptance window absorbs the resulting
+USB/serial jitter.
 
-- MTi: `MTiValidator.counters.dropped_packets`, from `packet_counter` gaps.
-- Radar: `RadarReceiver.dropped_frames`, from the sensor's own
-  `frame_number` header sequence.
-- Lidar: `LidarReceiver.dropped_frames`, from `frame_id` sequence gaps.
+## Sensor ingestion
 
-`run_gcs.py`'s `on_stop()` records all three as `EventWriter` events at the
-end of each session.
+### MTi-8 (tight coupling)
+
+`MTiReceiver` runs a daemon thread: serial bytes → `XbusParser` → MTData2
+decode → monotonic stamp → `MTiValidator` → ring buffer
+(`deque(maxlen=300)`, ≈1.5 s at 200 Hz) guarded by a lock.
+
+The validator (`mti8/validator.py`) gates what enters the buffer:
+
+- NaN/Inf rejection on accel/gyro/mag/quaternion
+- quaternion norm check (unit within tolerance)
+- packet-counter gap tracking (counts dropped sensor samples)
+- rotation-discontinuity check (logged as *suspicious*, not rejected)
+
+Only valid samples land in the buffer, so the matcher never sees garbage.
+
+### GNSS (loose coupling)
+
+`GNSSReceiver` parses NMEA GGA/RMC in its own thread and keeps only the
+**latest** fix. It is *not* time-matched: `Synchronizer._get_gnss()` snapshots
+whatever fix is current when a frame passes the sync gate and attaches it to
+every `SyncedFrame`. RMC UTC is converted to GPS week/TOW for downstream use.
+GNSS is metadata, not synchronized navigation data.
+
+## The matching algorithm
+
+`fusion/synchronizer.py` — `Synchronizer.sync(camera_frame)`:
+
+1. **Nearest-neighbour lookup.** `MTiReceiver.get_nearest(target_ts)` scans
+   the ring buffer newest-first and stops as soon as `abs(delta)` stops
+   improving (the buffer is chronologically ordered, so the first local
+   minimum is the global one). Returns the IMU sample closest in time to the
+   camera frame.
+2. **Acceptance gate.** If no IMU sample exists, or
+
+   ```
+   delta = |camera_timestamp_ns - imu_timestamp_ns|
+   delta > MAX_DELTA_NS = 20_000_000   # 20 ms
+   ```
+
+   the frame is **rejected for preview purposes**: `sync()` returns `None`
+   and the dashboard's sync error shows the `999.0 ms` sentinel. The camera
+   frame is still recorded — `sync()` returning `None` no longer prevents
+   `AcquisitionThread` from writing it (see `docs/SYNCHRONIZATION.md`).
+3. **GNSS attach.** Latest fix snapshot is attached (always succeeds, even
+   with no fix — fields default to zero / `"No Fix"`).
+4. **Emit.** A `SyncedFrame` carrying both raw payloads plus
+   `camera_timestamp_ns`, `imu_timestamp_ns`, `delta_ns` and the GNSS block.
+   The acquisition thread assigns a fresh `frame_uuid`.
+
+Why 20 ms: at 15–30 fps the frame period is 33–66 ms, so ±20 ms guarantees
+at most one IMU-mismatched frame boundary; the MTi-8's 200 Hz rate means the
+typical residual is well under 2.5 ms.
+
+### Failure modes (preview only — none of these affect recording)
+
+| Condition                     | Behaviour                                    |
+|-------------------------------|----------------------------------------------|
+| IMU disconnected / no packets | `get_nearest` → None → preview shows unsynced |
+| Delta > 20 ms (IMU stall)     | preview shows unsynced until stream recovers |
+| Write queue full              | frame counted as `dropped` by the writer     |
+
+A "rejected" preview match is simply skipped for the dashboard's residual
+display — there is no interpolation or back-filling, and it has no bearing
+on whether the camera frame, or any other sensor's sample, was recorded.
+
+## Persistence
+
+Recording is per-sensor now — see `docs/DATASET_WRITER.md` for exactly what
+`dataset/writer.py` writes for each of camera/MTi/radar/GNSS, and
+`docs/SYNCHRONIZATION.md` for how the actual recorded pairing is
+reconstructed **offline** (`fusion/offline_sync.py`), independent of this
+live preview. The MTi's HDF5 record preserves its own `device_timestamp`
+(`sample_time_fine`/`sample_time_coarse`) and `packet_counter` alongside the
+host `timestamp_ns` — that field-level detail lives in `docs/DATASET_FORMAT.md`.
+
+## Dashboard visibility
+
+The GUI never touches the acquisition path; it reads a lock-free
+`SharedFrame` snapshot refreshed by `AcquisitionThread`.
+
+- `sync_error_ms` — current residual (`999.0` = last frame unsynced)
+- `SyncDiagnosticsPanel` (`dashboard/sync_panel.py`) — current/avg/min/max,
+  p50/p95/p99, worst case, rejected percentage, scrolling history and
+  histogram, with reference lines at **15 ms (warn)** and **20 ms (reject)**.
+- Pre-record health gate (`dashboard/gate.py`): the `Synchronizer`/radar/lidar
+  checks are informational only and never block recording — only
+  camera/IMU/disk/calibration/settings checks are critical. See
+  `docs/SYNCHRONIZATION.md`.
+
+## Thread model summary
+
+| Thread             | Role                                                        |
+|--------------------|-------------------------------------------------------------|
+| MTi receiver       | serial → parse → validate → buffer                          |
+| Radar receiver     | serial → TLV parse → buffer                                 |
+| Lidar receiver     | Ouster SDK ingest → buffer + pcap/JSON (always, own thread) |
+| GNSS receiver      | serial NMEA → latest fix + buffer (+ NTRIP corrections out-of-band) |
+| AcquisitionThread  | grab → color convert → sync (preview) → enqueue camera write → publish snapshot |
+| MTi/Radar/GNSS structured pollers | drain buffers at native rate → enqueue writes |
+| Writer thread(s)   | NPY/HDF5/JSON/Parquet I/O off every hot path                |
+| Qt main thread     | renders the latest snapshot only                            |
+
+Synchronization itself is lock-free from the acquisition side: it takes one
+short lock-held scan of the IMU buffer per frame and never blocks on I/O.
+
+## Known limits
+
+- Arrival-time stamping includes transport jitter; no hardware sync between
+  ZED and MTi, and no PTP or GPS PPS is implemented today. An upgrade path
+  would be PTP or a shared strobe/PPS — the timestamp architecture already
+  separates device-clock from host-clock fields (see `docs/DATASET_FORMAT.md`)
+  so adding a PPS input would not require a redesign.
+- GNSS is latest-value only for this live preview — adequate for geo-tagging,
+  not for tightly coupled fusion. (The recorded GNSS stream, independent of
+  this preview, does buffer every fix at native rate — see
+  `docs/DATASET_WRITER.md`.)
+- Ring buffer covers ≈1.5 s; an IMU outage longer than that yields unmatched
+  preview frames until the buffer refills. This has no effect on recording.
