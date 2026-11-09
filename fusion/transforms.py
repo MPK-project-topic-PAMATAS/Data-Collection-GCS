@@ -73,9 +73,19 @@ def transform_points(T: np.ndarray, pts) -> np.ndarray:
 class Extrinsics:
     """All sensor poses in the vehicle frame, with chaining helpers."""
 
-    def __init__(self, poses: dict[str, np.ndarray], measured: dict[str, bool]):
+    def __init__(self, poses: dict[str, np.ndarray], measured: dict[str, bool],
+                 params: dict[str, dict] | None = None):
         self._T = poses          # name -> T_vehicle_sensor
         self.measured = measured
+        # raw yaml values (translation_m, rpy_deg) so UIs can edit/save them
+        self.params = params or {}
+
+    def set_pose(self, sensor: str, translation_m, rpy_deg=(0.0, 0.0, 0.0)):
+        """Replace a sensor's pose in memory (same meaning as the yaml)."""
+        R = rpy_to_matrix(*rpy_deg) @ NOMINAL_ROTATION[sensor]
+        self._T[sensor] = make_transform(R, translation_m)
+        self.params[sensor] = {"translation_m": [float(v) for v in translation_m],
+                               "rpy_deg": [float(v) for v in rpy_deg]}
 
     @property
     def sensors(self):
@@ -107,7 +117,7 @@ def load_extrinsics(path=DEFAULT_PATH, strict: bool = False) -> Extrinsics:
     import yaml
     with open(path, "r", encoding="utf-8") as f:
         doc = yaml.safe_load(f)
-    poses, measured = {}, {}
+    poses, measured, params = {}, {}, {}
     for name, e in doc["sensors"].items():
         if name not in NOMINAL_ROTATION:
             raise ValueError(f"unknown sensor '{name}' in {path}")
@@ -115,6 +125,8 @@ def load_extrinsics(path=DEFAULT_PATH, strict: bool = False) -> Extrinsics:
         R = rpy_to_matrix(*rpy) @ NOMINAL_ROTATION[name]
         poses[name] = make_transform(R, e["translation_m"])
         measured[name] = bool(e.get("measured", False))
+        params[name] = {"translation_m": [float(v) for v in e["translation_m"]],
+                        "rpy_deg": [float(v) for v in rpy]}
     missing = [n for n, m in measured.items() if not m and n != "imu"]
     if missing:
         msg = ("extrinsics not measured (placeholder values): "
@@ -122,4 +134,24 @@ def load_extrinsics(path=DEFAULT_PATH, strict: bool = False) -> Extrinsics:
         if strict:
             raise ValueError(msg)
         warnings.warn(msg, stacklevel=2)
-    return Extrinsics(poses, measured)
+    return Extrinsics(poses, measured, params)
+
+
+def save_sensor_pose(sensor: str, translation_m, rpy_deg, path=DEFAULT_PATH,
+                     source: str = "visual_alignment") -> None:
+    """Rewrite one sensor's block in the extrinsics yaml (other blocks and
+    comments are left untouched) and mark it measured."""
+    import re
+    path = Path(path)
+    text = path.read_text(encoding="utf-8")
+    tx = ", ".join(f"{float(v):.4f}" for v in translation_m)
+    rp = ", ".join(f"{float(v):.2f}" for v in rpy_deg)
+    block = (f"  {sensor}:\n"
+             f"    translation_m: [{tx}]\n"
+             f"    rpy_deg: [{rp}]\n"
+             f"    measured: true\n"
+             f"    source: {source}\n")
+    pat = re.compile(rf"^  {re.escape(sensor)}:.*?(?=^  \w+:|\Z)", re.S | re.M)
+    if not pat.search(text):
+        raise ValueError(f"sensor '{sensor}' not found in {path}")
+    path.write_text(pat.sub(lambda m: block, text, count=1), encoding="utf-8")

@@ -15,8 +15,10 @@ from __future__ import annotations
 import cv2
 import numpy as np
 import pyqtgraph as pg
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
-    QGroupBox, QHBoxLayout, QLabel, QVBoxLayout, QWidget,
+    QGridLayout, QGroupBox, QHBoxLayout, QLabel, QPushButton, QSlider,
+    QVBoxLayout, QWidget,
 )
 
 from dashboard.camera_panel import CameraImage
@@ -117,12 +119,14 @@ class RadarCameraOverlay(QWidget):
         group = QGroupBox("Lidar + Radar on Camera")
         gl = QVBoxLayout(group)
 
-        self.image = CameraImage()
-        gl.addWidget(self.image)
-        layout.addWidget(group)
-
         self._calib: dict | None = None
         self._ext = None
+        self._last = None          # (camera_rgb, points, lidar_points) for redraw
+
+        self.image = CameraImage()
+        gl.addWidget(self.image)
+        gl.addWidget(self._build_align_controls())
+        layout.addWidget(group)
 
     def _extrinsics(self):
         if self._ext is None:
@@ -133,6 +137,101 @@ class RadarCameraOverlay(QWidget):
                 self._ext = load_extrinsics()
         return self._ext
 
+    # (key, label, slider scale, min, max) — translation in mm, angles in 0.1 deg
+    _SLIDERS = (
+        ("x", "x fwd (m)", 1000.0, -1500, 1500),
+        ("y", "y left (m)", 1000.0, -1500, 1500),
+        ("z", "z up (m)", 1000.0, -1500, 1500),
+        ("roll", "roll (°)", 10.0, -450, 450),
+        ("pitch", "pitch (°)", 10.0, -450, 450),
+        ("yaw", "yaw (°)", 10.0, -1800, 1800),
+    )
+
+    def _build_align_controls(self) -> QGroupBox:
+        """Collapsible sliders that move the lidar's pose (vehicle frame, IMU
+        origin; camera is the reference, so this is the lidar-vs-camera
+        alignment) and redraw the overlay live. Save writes extrinsics.yaml."""
+        box = QGroupBox("Align lidar → camera (vehicle axes: x fwd, y left, z up)")
+        box.setCheckable(True)
+        box.setChecked(False)
+        inner = QWidget()
+        grid = QGridLayout(inner)
+        grid.setContentsMargins(0, 0, 0, 0)
+        self._sliders, self._value_lbls = {}, {}
+        for row, (key, label, scale, lo, hi) in enumerate(self._SLIDERS):
+            sl = QSlider(Qt.Orientation.Horizontal)
+            sl.setRange(lo, hi)
+            lbl = QLabel("0.000")
+            lbl.setMinimumWidth(48)
+            sl.valueChanged.connect(self._on_slider)
+            grid.addWidget(QLabel(label), row, 0)
+            grid.addWidget(sl, row, 1)
+            grid.addWidget(lbl, row, 2)
+            self._sliders[key], self._value_lbls[key] = sl, lbl
+        btns = QHBoxLayout()
+        self._save_btn = QPushButton("Save to extrinsics.yaml")
+        self._reset_btn = QPushButton("Reset")
+        self._save_btn.clicked.connect(self._save_pose)
+        self._reset_btn.clicked.connect(self._reset_pose)
+        self._align_status = QLabel("")
+        btns.addWidget(self._save_btn)
+        btns.addWidget(self._reset_btn)
+        btns.addWidget(self._align_status, 1)
+        grid.addLayout(btns, len(self._SLIDERS), 0, 1, 3)
+        v = QVBoxLayout(box)
+        v.setContentsMargins(6, 2, 6, 2)
+        v.addWidget(inner)
+        inner.setVisible(False)
+        box.toggled.connect(inner.setVisible)
+        self._load_sliders_from_ext()
+        return box
+
+    def _pose_from_sliders(self):
+        v = {k: self._sliders[k].value() / sc for k, _, sc, _, _ in self._SLIDERS}
+        return [v["x"], v["y"], v["z"]], [v["roll"], v["pitch"], v["yaw"]]
+
+    def _load_sliders_from_ext(self):
+        prm = self._extrinsics().params["lidar"]
+        vals = list(prm["translation_m"]) + list(prm["rpy_deg"])
+        for (key, _, scale, lo, hi), val in zip(self._SLIDERS, vals):
+            sl = self._sliders[key]
+            sl.blockSignals(True)
+            sl.setValue(int(round(max(lo, min(hi, val * scale)))))
+            sl.blockSignals(False)
+            self._value_lbls[key].setText(f"{sl.value() / scale:.3f}" if scale == 1000.0
+                                          else f"{sl.value() / scale:.1f}")
+
+    def _on_slider(self, _=None):
+        t, rpy = self._pose_from_sliders()
+        for key, _, scale, _, _ in self._SLIDERS:
+            val = self._sliders[key].value() / scale
+            self._value_lbls[key].setText(f"{val:.3f}" if scale == 1000.0 else f"{val:.1f}")
+        self._extrinsics().set_pose("lidar", t, rpy)
+        self._align_status.setText("unsaved")
+        if self._last is not None:
+            self.update_overlay(*self._last)
+
+    def _save_pose(self):
+        from fusion.transforms import save_sensor_pose
+        t, rpy = self._pose_from_sliders()
+        try:
+            save_sensor_pose("lidar", t, rpy)
+            self._align_status.setText("saved")
+        except Exception as e:  # noqa: BLE001
+            self._align_status.setText(f"save failed: {e}")
+
+    def _reset_pose(self):
+        import warnings
+        from fusion.transforms import load_extrinsics
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            fresh = load_extrinsics().params["lidar"]
+        self._extrinsics().set_pose("lidar", fresh["translation_m"], fresh["rpy_deg"])
+        self._load_sliders_from_ext()
+        self._align_status.setText("reset to saved")
+        if self._last is not None:
+            self.update_overlay(*self._last)
+
     def set_calib(self, calib: dict | None):
         """Camera intrinsics dict with fx/fy/cx/cy (camera.calib after
         ZEDCamera.open()). Overlay is skipped until this is set."""
@@ -142,6 +241,7 @@ class RadarCameraOverlay(QWidget):
                        lidar_points=None):
         if camera_rgb is None:
             return
+        self._last = (camera_rgb, points, lidar_points)
         have_lidar = lidar_points is not None and len(lidar_points) > 0
         if self._calib is None or (not points and not have_lidar):
             self.image.set_frame(camera_rgb)

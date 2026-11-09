@@ -67,3 +67,18 @@ def test_se3_projection_matches_legacy_when_parallel():
     legacy = project_point(p, 700, 700, 640, 360, RADAR_TO_CAMERA_OFFSET_M)
     uv = project_points_se3([[p.x, p.y, p.z]], ext, 700, 700, 640, 360)[0]
     assert np.allclose(uv, legacy, atol=0.51)
+
+
+def test_set_pose_and_save_roundtrip(tmp_path):
+    import shutil
+    from fusion.transforms import DEFAULT_PATH, save_sensor_pose
+    f = tmp_path / "e.yaml"
+    shutil.copy(DEFAULT_PATH, f)
+    save_sensor_pose("lidar", [0.1, -0.2, 0.3], [1.0, 2.0, 3.0], path=f)
+    ext = load_extrinsics(f)
+    assert np.allclose(ext.params["lidar"]["translation_m"], [0.1, -0.2, 0.3])
+    assert np.allclose(ext.params["lidar"]["rpy_deg"], [1.0, 2.0, 3.0])
+    assert ext.measured["lidar"] and not ext.measured["camera"]
+    assert np.allclose(ext.params["gnss"]["translation_m"], [0, 0, 0])   # untouched
+    ext.set_pose("lidar", [0, 0, 0], [0, 0, 90])
+    assert np.allclose(ext.transform([1, 0, 0], "lidar", "vehicle"), [0, 1, 0], atol=1e-9)
