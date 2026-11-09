@@ -20,6 +20,11 @@ Detected Objects TLV (type=1):
 Range Profile TLV (type=2):
   uint16[] magnitude (one value per configured range bin)
 
+Azimuth static heatmap TLV (type=4):
+  int16 (imag, real) pairs, numRangeBins * numVirtualAnt, range-major.
+  Needs guiMonitor's azimuth flag on and <=128 range bins (256 crashes
+  this firmware at sensorStart).
+
 Range-Doppler TLV (type=5):
   uint16[] matrix (numRangeBins * numDopplerBins, range-major)
 
@@ -45,6 +50,7 @@ _HEADER_SIZE = struct.calcsize(_HEADER_FMT)
 
 _TLV_DETECTED_POINTS = 1
 _TLV_RANGE_PROFILE = 2
+_TLV_AZIMUTH_STATIC = 4
 _TLV_RANGE_DOPPLER = 5
 
 _POINT_SIZE_BYTES = 16  # x, y, z, velocity as float32
@@ -74,7 +80,8 @@ def parse_frame_header(data: bytes) -> Optional[dict]:
 
 def parse_tlvs(payload: bytes, num_detected_obj: int,
                num_range_bins: int = 256,
-               num_doppler_bins: int = 16) -> dict:
+               num_doppler_bins: int = 16,
+               num_virt_ant: int = 8) -> dict:
     """Parse TLVs from the payload (bytes after the frame header).
 
     Returns dict with optional 'points' (List[RadarPoint]),
@@ -104,6 +111,13 @@ def parse_tlvs(payload: bytes, num_detected_obj: int,
                 result["range_doppler"] = rd
                 result["num_range_bins"] = rd.shape[0]
                 result["num_doppler_bins"] = rd.shape[1]
+
+        elif tlv_type == _TLV_AZIMUTH_STATIC and "range_azimuth" not in result:
+            ra = _parse_range_azimuth(
+                payload, body, tlv_len, num_range_bins, num_virt_ant
+            )
+            if ra is not None:
+                result["range_azimuth"] = ra
 
         elif tlv_type == _TLV_RANGE_PROFILE and "range_profile" not in result:
             rp = _parse_range_profile(payload, body, tlv_len, num_range_bins)
@@ -149,6 +163,29 @@ def _parse_range_doppler(payload: bytes, offset: int, tlv_len: int,
                             offset=offset)
         rd = raw.reshape(num_range, num_doppler)
         return rd.copy()
+    except Exception:
+        return None
+
+
+def _parse_range_azimuth(payload: bytes, offset: int, tlv_len: int,
+                         num_range: int, num_virt_ant: int,
+                         num_angle_bins: int = 64) -> Optional[np.ndarray]:
+    """Parse the azimuth static heatmap TLV into a (range, angle) magnitude map.
+
+    Raw data is complex int16 (imag first) per range bin per virtual antenna;
+    an FFT across antennas gives the angle axis (fftshifted, centre = boresight).
+    """
+    if not (0 < num_range <= 1024 and 0 < num_virt_ant <= 16):
+        return None
+    n = num_range * num_virt_ant
+    if tlv_len < n * 4 or offset + n * 4 > len(payload):
+        return None
+    try:
+        raw = np.frombuffer(payload, dtype=np.int16, count=n * 2,
+                            offset=offset).reshape(num_range, num_virt_ant, 2)
+        cplx = raw[..., 1].astype(np.float32) + 1j * raw[..., 0].astype(np.float32)
+        spec = np.fft.fftshift(np.fft.fft(cplx, n=num_angle_bins, axis=1), axes=1)
+        return np.abs(spec).astype(np.float32)
     except Exception:
         return None
 
@@ -213,6 +250,26 @@ def _self_test():
     assert res2["range_doppler"][3, 2] == 14
     assert res2["num_range_bins"] == num_rng
     assert res2["num_doppler_bins"] == num_dop
+
+    # Azimuth static heatmap TLV (type 4): a single real-valued tone across
+    # the 8 virtual antennas must peak at the expected angle bin.
+    n_rng, n_ant = 4, 8
+    k = 2  # spatial frequency in cycles per 8 antennas
+    raw = np.zeros((n_rng, n_ant, 2), dtype=np.int16)
+    ph = 2 * np.pi * k * np.arange(n_ant) / n_ant
+    raw[1, :, 1] = (1000 * np.cos(ph)).astype(np.int16)   # real
+    raw[1, :, 0] = (1000 * np.sin(ph)).astype(np.int16)   # imag
+    az_tlv = _s.pack("<II", _TLV_AZIMUTH_STATIC, raw.nbytes) + raw.tobytes()
+    res3 = parse_tlvs(pc_tlv + az_tlv, num_obj, num_range_bins=n_rng,
+                      num_virt_ant=n_ant)
+    ra = res3["range_azimuth"]
+    assert ra.shape == (n_rng, 64), ra.shape
+    assert int(np.argmax(ra[1])) == 32 + k * 64 // n_ant   # fftshifted bin
+    assert ra[0].max() == 0.0
+    # Truncated TLV must be rejected, not crash.
+    bad = _s.pack("<II", _TLV_AZIMUTH_STATIC, 8) + raw.tobytes()[:8]
+    assert "range_azimuth" not in parse_tlvs(bad, 0, num_range_bins=n_rng,
+                                             num_virt_ant=n_ant)
 
     print("radar.parser self-test OK")
 

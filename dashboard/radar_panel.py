@@ -1,19 +1,13 @@
-"""Radar Panel — AWR1843 point cloud XY scatter + camera overlay.
+"""Radar Panel — AWR1843 point cloud + camera overlay.
 
-Two plots:
-  Top:   XY scatter (range vs azimuth) — bird's-eye view, points colored by Doppler velocity
-  Bottom: Radar points projected onto the live camera image (see radar_camera_demo.py
-          for the standalone version and the projection math/limitations —
-          no measured camera<->radar extrinsic, assumes co-located sensors)
+Two plots, side by side:
+  Left:  top-down point cloud (lateral X vs longitudinal Y), points coloured
+         by radial velocity.
+  Right: Radar points projected onto the live camera image (see radar_camera_demo.py
+         for the projection math and limitations).
 
-The panel used to show a range-Doppler heatmap here instead. The radar's
-active sensor config (radar/receiver.py's _SENSOR_CONFIG_CMDS) is azimuth-only
-(TX0+TX2 MIMO, no elevation antenna) with the heatmap TLV enabled; a 3TX
-elevation-capable profile was tried and reverted after live testing showed
-noisier detections (untuned CFAR thresholds) plus this firmware couldn't
-combine 3TX with the heatmap output anyway — see git history on this file
-around that experiment. Camera overlay was chosen over the heatmap panel
-regardless of that revert.
+Radar config (radar/receiver.py's _SENSOR_CONFIG_CMDS) is 3TX (TX0+TX1+TX2,
+elevation-capable), 256 ADC samples, heatmap output off, so point z varies.
 """
 
 from __future__ import annotations
@@ -31,7 +25,7 @@ from dashboard.theme import COLORS
 pg.setConfigOptions(antialias=True, background=COLORS["bg_dark"], foreground=COLORS["text"])
 
 _MAX_POINTS = 256
-_MAX_X = 12.0   # lateral extent shown in the XY scatter (m)
+_MAX_X = 8.0    # lateral half-extent of the heatmap view (m)
 _MAX_Y = 10.0   # forward range shown (m)
 
 
@@ -47,75 +41,52 @@ def _color_by_velocity(vel_mps: float, max_vel: float = 5.0) -> tuple:
     return (r, g, b, 220)
 
 
-class RadarXYScatter(QWidget):
-    """Bird's-eye view: X (lateral) vs Y (forward/range) scatter."""
+_FAN_HALF_DEG = 70.0     # half field of view drawn for the guide lines
+
+
+class RadarPointView(QWidget):
+    """Top-down radar point cloud (lateral X vs longitudinal Y), points
+    coloured by radial velocity, with range rings and angle guides."""
 
     def __init__(self, parent=None):
         super().__init__(parent)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
 
-        group = QGroupBox("Radar XY (bird's-eye)")
+        group = QGroupBox("Radar Point Cloud (top-down)")
         gl = QVBoxLayout(group)
 
-        self.plot = pg.PlotWidget()
-        self.plot.setLabel("left", "Forward (m)")
-        self.plot.setLabel("bottom", "Lateral X (m)")
-        self.plot.showGrid(x=True, y=True, alpha=0.3)
+        self.glw = pg.GraphicsLayoutWidget()
+        self.glw.setMinimumHeight(160)
+        self.plot = self.glw.addPlot()
+        self.plot.setLabel("left", "Longitudinal distance (m)")
+        self.plot.setLabel("bottom", "Lateral distance (m)")
         self.plot.setAspectLocked(True)
-        self.plot.setMinimumHeight(160)
-        self.plot.setXRange(-_MAX_X, _MAX_X)
-        self.plot.setYRange(0, _MAX_Y)
+        self.plot.setMouseEnabled(False, False)
+        self.plot.setXRange(-_MAX_X, _MAX_X, padding=0)
+        self.plot.setYRange(0, _MAX_Y, padding=0)
+        self.plot.disableAutoRange()
 
-        ego = pg.ScatterPlotItem([0], [0], pen=None,
-                                 brush=pg.mkBrush(COLORS["zed"]),
-                                 size=10, symbol="t1")
-        self.plot.addItem(ego)
+        ring_pen = pg.mkPen(255, 255, 255, 60, width=1)
+        for r in range(2, int(_MAX_Y) + 1, 2):
+            t = np.radians(np.linspace(-_FAN_HALF_DEG, _FAN_HALF_DEG, 90))
+            self.plot.addItem(pg.PlotCurveItem(r * np.sin(t), r * np.cos(t), pen=ring_pen))
+        for deg in (-60, -30, 0, 30, 60):
+            t = np.radians(deg)
+            self.plot.addItem(pg.PlotCurveItem(
+                [0, _MAX_Y * np.sin(t)], [0, _MAX_Y * np.cos(t)], pen=ring_pen))
 
-        self.scatter = pg.ScatterPlotItem()
-        self.plot.addItem(self.scatter)
-
-        # Circle overlay for moving objects
-        self.circles_scatter = None
-
-        gl.addWidget(self.plot)
+        self.points = pg.ScatterPlotItem(pen=pg.mkPen(0, 0, 0, 160), size=9)
+        self.plot.addItem(self.points)
+        gl.addWidget(self.glw)
         layout.addWidget(group)
 
     def update_points(self, points):
-        # Clear old circle overlay
-        if self.circles_scatter is not None:
-            self.plot.removeItem(self.circles_scatter)
-            self.circles_scatter = None
-
-        if not points:
-            self.scatter.setData([])
-            return
-
-        n = min(len(points), _MAX_POINTS)
-        x, y, vel, circle_x, circle_y = [], [], [], [], []
-
-        for p in points[:n]:
-            x.append(p.x)
-            y.append(p.y)
-            vel.append(p.velocity_mps)
-
-            # Track moving objects for circle visualization
-            if abs(p.velocity_mps) > 0.3:  # threshold: 0.3 m/s
-                circle_x.append(p.x)
-                circle_y.append(p.y)
-
-        # Draw hollow circles for moving objects using scatter with ring symbol
-        if circle_x:
-            circles = pg.ScatterPlotItem()
-            circles.setData(circle_x, circle_y,
-                          pen=pg.mkPen(color=pg.mkColor(255, 255, 100), width=2),
-                          brush=pg.mkBrush(color=pg.mkColor(100, 100, 100, 80)),
-                          size=12, symbol='o')
-            self.plot.addItem(circles)
-            self.circles_scatter = circles
-
-        brushes = [pg.mkBrush(*_color_by_velocity(v)) for v in vel]
-        self.scatter.setData(x, y, pen=None, brush=brushes, size=7)
+        pts = (points or [])[:_MAX_POINTS]
+        self.points.setData(
+            [p.x for p in pts], [p.y for p in pts],
+            brush=[pg.mkBrush(*_color_by_velocity(p.velocity_mps)) for p in pts],
+        )
 
 
 class RadarCameraOverlay(QWidget):
@@ -123,7 +94,7 @@ class RadarCameraOverlay(QWidget):
 
     Projection: the AWR1843's detected-object TLV reports Cartesian points
     as x=lateral(+right), y=forward/range, z=up (radar/parser.py's TLV
-    docstring; also how RadarXYScatter above already plots them). Relabeled
+    docstring; also how the heatmap's point overlay already plots them). Relabeled
     for the pinhole model (camera x=right, y=down, z=forward):
         Xc, Yc, Zc = p.x, -p.z, p.y
         u = cx + fx * Xc / Zc
@@ -143,7 +114,7 @@ class RadarCameraOverlay(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
 
-        group = QGroupBox("Radar on Camera")
+        group = QGroupBox("Lidar + Radar on Camera")
         gl = QVBoxLayout(group)
 
         self.image = CameraImage()
@@ -151,16 +122,28 @@ class RadarCameraOverlay(QWidget):
         layout.addWidget(group)
 
         self._calib: dict | None = None
+        self._ext = None
+
+    def _extrinsics(self):
+        if self._ext is None:
+            import warnings
+            from fusion.transforms import load_extrinsics
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")   # placeholder poses are expected
+                self._ext = load_extrinsics()
+        return self._ext
 
     def set_calib(self, calib: dict | None):
         """Camera intrinsics dict with fx/fy/cx/cy (camera.calib after
         ZEDCamera.open()). Overlay is skipped until this is set."""
         self._calib = calib
 
-    def update_overlay(self, camera_rgb: np.ndarray | None, points):
+    def update_overlay(self, camera_rgb: np.ndarray | None, points,
+                       lidar_points=None):
         if camera_rgb is None:
             return
-        if self._calib is None or not points:
+        have_lidar = lidar_points is not None and len(lidar_points) > 0
+        if self._calib is None or (not points and not have_lidar):
             self.image.set_frame(camera_rgb)
             return
 
@@ -172,7 +155,13 @@ class RadarCameraOverlay(QWidget):
         fx, fy = self._calib["fx"], self._calib["fy"]
         cx, cy = self._calib["cx"], self._calib["cy"]
 
-        for p in points:
+        if have_lidar:
+            from lidar.projection import draw_depth_dots, project_lidar_to_camera
+            u, v, d = project_lidar_to_camera(
+                lidar_points, self._extrinsics(), fx, fy, cx, cy, w, h)
+            draw_depth_dots(img, u, v, d)
+
+        for p in points or []:
             px = project_point(p, fx, fy, cx, cy, RADAR_TO_CAMERA_OFFSET_M)
             if px is None:
                 continue
@@ -180,14 +169,14 @@ class RadarCameraOverlay(QWidget):
             if not (0 <= u < w and 0 <= v < h):
                 continue
             color = _color_by_velocity(p.velocity_mps)[:3]
-            cv2.circle(img, (u, v), 8, color, 2)
-            cv2.circle(img, (u, v), 2, color, -1)
+            cv2.circle(img, (u, v), 14, color, -1)
+            cv2.circle(img, (u, v), 14, (255, 255, 255), 2)
 
         self.image.set_frame(img)
 
 
 class RadarPanel(QWidget):
-    """Combined radar panel: XY scatter + range-Doppler side by side."""
+    """Combined radar panel: top-down point cloud + camera overlay side by side."""
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -198,9 +187,9 @@ class RadarPanel(QWidget):
 
         plots = QHBoxLayout()
         plots.setSpacing(4)
-        self.xy = RadarXYScatter()
+        self.heatmap = RadarPointView()
         self.overlay = RadarCameraOverlay()
-        plots.addWidget(self.xy, stretch=1)
+        plots.addWidget(self.heatmap, stretch=1)
         plots.addWidget(self.overlay, stretch=1)
         outer.addLayout(plots, stretch=1)
 
@@ -226,9 +215,10 @@ class RadarPanel(QWidget):
         self.overlay.set_calib(calib)
 
     def update(self, points, radar_ts_ns, radar_frame_id,
-               num_objects, camera_ts_ns=0, camera_rgb=None):
-        self.xy.update_points(points)
-        self.overlay.update_overlay(camera_rgb, points)
+               num_objects, camera_ts_ns=0, camera_rgb=None,
+               range_azimuth=None, lidar_points=None):
+        self.heatmap.update_points(points)
+        self.overlay.update_overlay(camera_rgb, points, lidar_points)
         self.frame_lbl.setText(f"Frame: {radar_frame_id}")
         self.obj_lbl.setText(f"Objects: {num_objects}")
         if points:

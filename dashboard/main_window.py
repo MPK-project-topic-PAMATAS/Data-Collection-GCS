@@ -299,11 +299,13 @@ class MainWindow(QMainWindow):
         self._radar_last_frame = frame_id
         self.radar_panel.update(
             points=s.radar_points,
+            range_azimuth=s.radar_range_azimuth,
             radar_ts_ns=s.radar_ts_ns,
             radar_frame_id=s.radar_frame_id,
             num_objects=s.radar_num_objects,
             camera_ts_ns=s.timestamp_ns,
             camera_rgb=s.left_rgb,
+            lidar_points=s.lidar_points,
         )
 
     def _mti_euler(self, quat):

@@ -12,7 +12,7 @@ the image.
 
 Projection math: the AWR1843's detected-object TLV reports Cartesian points
 as x=lateral (+right), y=forward/range, z=up (see radar/parser.py's TLV
-docstring; also how dashboard/radar_panel.py's XY scatter already plots
+docstring; also how dashboard/radar_panel.py's heatmap point overlay plots
 them). That is a standard camera-relative frame once relabeled for the
 pinhole model (camera x=right, y=down, z=forward):
     Xc, Yc, Zc = p.x, -p.z, p.y
@@ -31,6 +31,16 @@ Usage:
     python radar_camera_demo.py                # camera + radar overlay
     python radar_camera_demo.py --no-radar      # camera only
     python radar_camera_demo.py --no-camera     # radar-only bird's-eye view
+    python radar_camera_demo.py --webcam        # force a plain USB webcam
+                                                 # instead of the ZED (also
+                                                 # used automatically if the
+                                                 # ZED SDK fails to open one)
+
+Webcam fallback: a plain UVC webcam has no calibrated intrinsics, so fx/fy
+are approximated from --webcam-fov-deg (a guessed horizontal FOV) and cx/cy
+are just the image center. Radar points will land in roughly the right place
+but not pixel-accurate — for real accuracy, measure the webcam's intrinsics
+(e.g. OpenCV chessboard calibration) and pass them via --webcam-fx/--webcam-fy.
 
 Press 'q' in the window (or Ctrl+C in the terminal) to quit.
 """
@@ -117,10 +127,78 @@ def _draw_radar_canvas(points) -> np.ndarray:
     return canvas
 
 
+class _WebcamFrame:
+    __slots__ = ("left",)
+
+    def __init__(self, left: np.ndarray):
+        self.left = left
+
+
+class WebcamCamera:
+    """Fallback camera source for a plain UVC webcam (no ZED SDK / hardware
+    needed). Exposes the same open()/grab()/close()/.calib surface that
+    _overlay_points() and main()'s loop expect from ZEDCamera, so the rest
+    of the script doesn't need to know which one it's talking to.
+
+    A generic webcam reports no calibrated intrinsics, so fx/fy are derived
+    from a guessed horizontal FOV (--webcam-fov-deg) unless overridden via
+    --webcam-fx/--webcam-fy, and cx/cy default to the image center. This
+    makes the radar overlay approximate, not pixel-accurate.
+    """
+
+    def __init__(self, index: int, fov_deg: float,
+                 fx: float | None = None, fy: float | None = None):
+        self.index = index
+        self.fov_deg = fov_deg
+        self._fx_override = fx
+        self._fy_override = fy
+        self.cap = None
+        self.calib = None
+
+    def open(self):
+        self.cap = cv2.VideoCapture(self.index)
+        if not self.cap.isOpened():
+            raise RuntimeError(f"Failed to open webcam at index {self.index}")
+
+        w = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        h = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        cx, cy = w / 2.0, h / 2.0
+        fx = self._fx_override if self._fx_override is not None else \
+            (w / 2.0) / np.tan(np.radians(self.fov_deg) / 2.0)
+        fy = self._fy_override if self._fy_override is not None else fx
+
+        self.calib = {
+            "model": "webcam (uncalibrated)",
+            "fx": fx, "fy": fy, "cx": cx, "cy": cy,
+            "width": w, "height": h,
+        }
+
+    def grab(self):
+        ok, frame = self.cap.read()
+        if not ok:
+            return None
+        return _WebcamFrame(left=frame)
+
+    def close(self):
+        if self.cap is not None:
+            self.cap.release()
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--no-camera", action="store_true", help="Radar only (bird's-eye view)")
     parser.add_argument("--no-radar", action="store_true", help="Camera only")
+    parser.add_argument("--webcam", action="store_true",
+                         help="Force a plain USB webcam instead of the ZED")
+    parser.add_argument("--webcam-index", type=int, default=0,
+                         help="cv2.VideoCapture index for the webcam (default 0)")
+    parser.add_argument("--webcam-fov-deg", type=float, default=70.0,
+                         help="Guessed horizontal FOV (deg) used to approximate "
+                              "fx/fy if --webcam-fx/--webcam-fy aren't given")
+    parser.add_argument("--webcam-fx", type=float, default=None,
+                         help="Known/calibrated fx (px) for the webcam, if available")
+    parser.add_argument("--webcam-fy", type=float, default=None,
+                         help="Known/calibrated fy (px) for the webcam, if available")
     args = parser.parse_args()
 
     if args.no_camera and args.no_radar:
@@ -130,12 +208,27 @@ def main():
     radar = None
 
     if not args.no_camera:
-        from camera.zed_camera import ZEDCamera
-        camera = ZEDCamera()
-        camera.open()
-        print(f"ZED camera opened. fx={camera.calib['fx']:.1f} "
-              f"fy={camera.calib['fy']:.1f} cx={camera.calib['cx']:.1f} "
-              f"cy={camera.calib['cy']:.1f}")
+        camera = WebcamCamera(args.webcam_index, args.webcam_fov_deg,
+                               args.webcam_fx, args.webcam_fy) if args.webcam else None
+        if camera is None:
+            try:
+                from camera.zed_camera import ZEDCamera
+                camera = ZEDCamera()
+                camera.open()
+                print(f"ZED camera opened. fx={camera.calib['fx']:.1f} "
+                      f"fy={camera.calib['fy']:.1f} cx={camera.calib['cx']:.1f} "
+                      f"cy={camera.calib['cy']:.1f}")
+            except Exception as exc:
+                print(f"ZED camera unavailable ({exc}); falling back to webcam "
+                      f"index {args.webcam_index}.")
+                camera = WebcamCamera(args.webcam_index, args.webcam_fov_deg,
+                                       args.webcam_fx, args.webcam_fy)
+        if isinstance(camera, WebcamCamera):
+            camera.open()
+            print(f"Webcam opened (index {camera.index}, uncalibrated). "
+                  f"fx={camera.calib['fx']:.1f} fy={camera.calib['fy']:.1f} "
+                  f"cx={camera.calib['cx']:.1f} cy={camera.calib['cy']:.1f} "
+                  f"— radar overlay will be approximate.")
 
     if not args.no_radar:
         from radar.receiver import RadarReceiver

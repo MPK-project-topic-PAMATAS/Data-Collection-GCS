@@ -20,6 +20,8 @@ class RadarFrame:
     # (nRange, nDoppler) uint16 power values.  Rows are range bins and
     # columns are Doppler bins, matching the TI SDK 3 output order.
     range_doppler: "np.ndarray | None" = None
+    # (nRange, nAngle) float32 magnitude; angle axis spans -90..+90 deg.
+    range_azimuth: "np.ndarray | None" = None
     range_profile: "np.ndarray | None" = None   # (nRange,) float32
     timestamp_ns: int = 0
     frame_id: int = 0

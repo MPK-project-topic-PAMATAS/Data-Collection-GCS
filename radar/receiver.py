@@ -23,7 +23,7 @@ from config.settings import (
     RADAR_CFG_PORT, RADAR_CFG_BAUD,
     RADAR_DATA_PORT, RADAR_DATA_BAUD,
     RADAR_BUFFER_SIZE,
-    RADAR_NUM_RANGE_BINS, RADAR_NUM_DOPPLER_BINS,
+    RADAR_NUM_RANGE_BINS, RADAR_NUM_DOPPLER_BINS, RADAR_NUM_VIRT_ANT,
     RADAR_STREAM_TIMEOUT_NS,
     RADAR_RECONFIG_TIMEOUT_NS,
 )
@@ -34,7 +34,11 @@ _WATCHDOG_POLL_S = 1.0
 _RECONFIG_BACKOFF_S = 2.0
 _RECONFIG_BACKOFF_MAX_S = 30.0
 
-# 3TX elevation-capable config (TX0 + TX1 + TX2). TX1 is the antenna
+# 3TX elevation-capable config (TX0 + TX1 + TX2), 256 ADC samples, heatmap
+# output OFF (this firmware can't combine the 3TX chirp table with heatmap
+# output; the dashboard shows the point cloud only).
+#
+# (3TX details) TX1 is the antenna
 # offset vertically from TX0/TX2 (confirmed both live and in TI's EVM
 # user's guide SPRUIM4B section 2.7 — see docs/RADAR_POINT_CLOUD.md);
 # enabling it is what makes z (elevation) vary instead of being hard-
@@ -183,6 +187,7 @@ class RadarReceiver:
                 payload, hdr["num_detected_obj"],
                 num_range_bins=RADAR_NUM_RANGE_BINS,
                 num_doppler_bins=RADAR_NUM_DOPPLER_BINS,
+                num_virt_ant=RADAR_NUM_VIRT_ANT,
             )
             if not parsed:
                 continue
@@ -196,6 +201,7 @@ class RadarReceiver:
                 points=parsed.get("points", []),
                 range_doppler=parsed.get("range_doppler"),
                 range_profile=parsed.get("range_profile"),
+                range_azimuth=parsed.get("range_azimuth"),
                 timestamp_ns=now,
                 frame_id=hdr["frame_number"],
                 num_objects=hdr["num_detected_obj"],

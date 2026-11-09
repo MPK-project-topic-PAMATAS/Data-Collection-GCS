@@ -1,7 +1,7 @@
 """Estimate host clock drift/jitter against GPS time from a recorded session.
 
 There is no hardware PPS/PTP anywhere in this pipeline (see
-SYNCHRONIZATION.md) — every sensor timestamp is a host-clock arrival stamp,
+docs/SYNCHRONIZATION.md) — every sensor timestamp is a host-clock arrival stamp,
 and dataset/clock.py assumes the host monotonic->wall offset is constant for
 the life of a recording. This script checks that assumption using the one
 absolute time reference already recorded alongside the data: each GNSS fix's

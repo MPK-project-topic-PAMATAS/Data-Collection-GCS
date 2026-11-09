@@ -87,3 +87,16 @@ Rotation about vertical axis (if any): ______ degrees
 | Operator | |
 
 ## Notes
+
+## Vehicle-frame sensor poses (fusion/transforms.py)
+
+Vehicle frame: origin at the MTi-8 IMU center, x forward, y left, z up.
+Measure each sensor's origin from the IMU center **in vehicle axes** and enter
+it in `calibration/extrinsics/extrinsics.yaml` (set `measured: true`).
+
+| Sensor | Reference point | x fwd (m) | y left (m) | z up (m) | Tilt rpy (deg) | Verified |
+| ------ | --------------- | --------- | ---------- | -------- | -------------- | -------- |
+| camera | ZED 2 left lens optical center | | | | | [ ] |
+| radar  | AWR1843 antenna array phase center | | | | | [ ] |
+| lidar  | Ouster OS-0-64 sensor-frame origin | | | | | [ ] |
+| gnss   | antenna phase center | | | | | [ ] |

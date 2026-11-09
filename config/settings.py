@@ -79,16 +79,13 @@ RADAR_DATA_PORT = "/dev/ttyACM1"
 RADAR_DATA_BAUD = 921600
 RADAR_BUFFER_SIZE = 60
 # These must match the active AWR1843 profile in radar/receiver.py.
-RADAR_NUM_RANGE_BINS = 256
-# frameCfg uses 16 loops; each virtual channel gets 16 Doppler chirps per
-# frame regardless of how many TX antennas the chirp table alternates
-# between (3 TX — TX0/TX1/TX2, for elevation — as of the 3TX config
-# change). NOTE: the range-Doppler heatmap TLV that this bin count
-# describes is currently NOT produced by the sensor at all — this
-# firmware can't combine the 3TX chirp table with heatmap output (see the
-# comment above _SENSOR_CONFIG_CMDS in radar/receiver.py); dashboard's
-# radar panel doesn't need it anyway (RadarCameraOverlay replaced the old
-# heatmap widget). This constant is dormant until/unless that changes.
+RADAR_NUM_RANGE_BINS = 256   # 256 ADC samples (heatmap output is off in 3TX)
+# Range per bin for profileCfg in radar/receiver.py:
+# c * fs / (2 * slope * N) = c * 5.209e6 / (2 * 70e12 * 256) ~= 0.0436 m
+RADAR_RANGE_RES_M = 0.0436
+RADAR_NUM_VIRT_ANT = 12  # 4 RX x 3 TX (elevation-capable config)
+# frameCfg uses 16 loops (3TX: TX0/TX1/TX2). No range-Doppler/azimuth heatmap
+# TLV is produced; this constant is dormant.
 RADAR_NUM_DOPPLER_BINS = 16
 MAX_DELTA_NS = 20_000_000       # max camera↔IMU sync delta (20 ms)
 # frameCfg uses a 100 ms frame period (3TX config); nearest-frame matching

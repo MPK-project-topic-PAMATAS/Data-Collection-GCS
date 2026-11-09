@@ -21,8 +21,17 @@ class SerialReader:
         self._raw_file = None
         self._raw_lock = threading.Lock()
 
+    # TI XDS110 (AWR1843BOOST radar) USB vendor id: never the MTi, and opening
+    # its ttyACM ports steals them from the radar receiver.
+    _RADAR_VID = 0x0451
+
     def _auto_detect_port(self):
-        ports = serial.tools.list_ports.comports()
+        ports = [p for p in serial.tools.list_ports.comports()
+                 if p.vid != self._RADAR_VID
+                 and "xds110" not in (p.description or "").lower()]
+        for p in ports:
+            if p.device == self._port:
+                return p.device
         for p in ports:
             if "ttyUSB" in p.device or "ttyACM" in p.device:
                 return p.device

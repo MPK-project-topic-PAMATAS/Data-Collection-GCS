@@ -37,3 +37,21 @@ def project_point(p, fx: float, fy: float, cx: float, cy: float,
     u = cx + fx * xc / yc
     v = cy + fy * (-zc) / yc
     return int(round(u)), int(round(v))
+
+
+def project_points_se3(pts_radar, extrinsics, fx: float, fy: float,
+                       cx: float, cy: float):
+    """Full 6-DoF radar -> pixel projection using fusion.transforms.Extrinsics.
+
+    pts_radar: (N, 3) radar-frame points (x=right, y=fwd, z=up).  Unlike
+    project_point(), this honours mount rotation (tilt/yaw) between radar and
+    camera.  Returns (N, 2) float pixels with NaN for points behind the camera.
+    """
+    import numpy as np
+    pc = extrinsics.transform(np.asarray(pts_radar, float), "radar", "camera")
+    pc = np.atleast_2d(pc)
+    z = pc[:, 2]
+    with np.errstate(divide="ignore", invalid="ignore"):
+        uv = np.stack([cx + fx * pc[:, 0] / z, cy + fy * pc[:, 1] / z], axis=1)
+    uv[z <= 0] = np.nan
+    return uv

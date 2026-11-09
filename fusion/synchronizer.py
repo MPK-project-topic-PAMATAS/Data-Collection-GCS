@@ -77,6 +77,7 @@ class Synchronizer:
         return RadarData(
             points=frame.points,
             range_doppler=frame.range_doppler,
+            range_azimuth=getattr(frame, "range_azimuth", None),
             range_profile=frame.range_profile,
             timestamp_ns=frame.timestamp_ns,
             frame_id=frame.frame_id,

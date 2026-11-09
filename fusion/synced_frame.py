@@ -30,6 +30,7 @@ class GNSSData:
 class RadarData:
     points: List[RadarPoint] = field(default_factory=list)
     range_doppler: np.ndarray | None = None
+    range_azimuth: np.ndarray | None = None
     range_profile: np.ndarray | None = None
     timestamp_ns: int = 0
     frame_id: int = 0

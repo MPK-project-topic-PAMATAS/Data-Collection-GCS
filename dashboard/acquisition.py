@@ -45,7 +45,7 @@ class SharedFrame:
         "recording_start", "_lock",
         "mti_stale", "mti_state",
         "zed_imu_stale",
-        "radar_points", "radar_range_doppler", "radar_ts_ns",
+        "radar_points", "radar_range_azimuth", "radar_range_doppler", "radar_ts_ns",
         "radar_frame_id", "radar_num_objects", "radar_stale",
         "radar_range_profile", "radar_streaming", "radar_rate",
         "lidar_points", "lidar_ts_ns", "lidar_frame_id",
@@ -117,6 +117,7 @@ class SharedFrame:
         self.zed_imu_stale = True
         self.radar_points = []
         self.radar_range_doppler = None
+        self.radar_range_azimuth = None
         self.radar_ts_ns = 0
         self.radar_frame_id = 0
         self.radar_num_objects = 0
@@ -287,6 +288,7 @@ class AcquisitionThread(threading.Thread):
             radar_stale = True
             radar_points = []
             radar_range_doppler = None
+            radar_range_azimuth = None
             radar_range_profile = None
             radar_ts_ns = 0
             radar_frame_id = 0
@@ -297,6 +299,7 @@ class AcquisitionThread(threading.Thread):
             if synced and synced.radar and synced.radar.timestamp_ns:
                 radar_points = synced.radar.points
                 radar_range_doppler = synced.radar.range_doppler
+                radar_range_azimuth = synced.radar.range_azimuth
                 radar_range_profile = synced.radar.range_profile
                 radar_ts_ns = synced.radar.timestamp_ns
                 radar_frame_id = synced.radar.frame_id
@@ -462,6 +465,7 @@ class AcquisitionThread(threading.Thread):
             new.recording_start = self.buffer.recording_start
             new.radar_points = radar_points
             new.radar_range_doppler = radar_range_doppler
+            new.radar_range_azimuth = radar_range_azimuth
             new.radar_ts_ns = radar_ts_ns
             new.radar_frame_id = radar_frame_id
             new.radar_num_objects = radar_num_objects

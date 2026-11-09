@@ -105,3 +105,23 @@ def test_late_source_returns_empty_not_wrong_timestamp():
     assert synced.lidar_timestamp_ns == 0
     assert synced.radar.num_objects == 0
     assert synced.lidar.num_points == 0
+
+
+def test_radar_range_azimuth_is_passed_through_when_present():
+    """The dashboard heatmap reads synced.radar.range_azimuth; frames from
+    sources that don't produce it (e.g. native backend) must yield None."""
+    import numpy as np
+
+    cam_ns = 1_700_000_000_000_000_000
+    ra = np.ones((4, 64), dtype=np.float32)
+
+    class RadarWithHeatmap(RADAR):
+        def get_nearest(self, target):
+            f = super().get_nearest(target)
+            f.range_azimuth = ra
+            return f
+
+    for radar, expected in ((RadarWithHeatmap(cam_ns), ra), (RADAR(cam_ns), None)):
+        synced = Synchronizer(MTI(cam_ns), gnss_receiver=GNSS(cam_ns),
+                              radar_receiver=radar).sync(_frame(cam_ns))
+        assert synced.radar.range_azimuth is expected
