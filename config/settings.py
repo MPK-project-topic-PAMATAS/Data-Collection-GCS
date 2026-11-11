@@ -130,6 +130,14 @@ LIDAR_MAX_DELTA_NS = 50_000_000
 # as offline (avoids false alarms between 10 Hz frames).
 LIDAR_STREAM_TIMEOUT_NS = 1_000_000_000
 
+# Ouster timestamp source.  None leaves the sensor's current setting alone.
+# "TIME_FROM_INTERNAL_OSC" free-runs from power-on (cannot be related to the
+# host clock except by host-arrival stamps).  "TIME_FROM_PTP_1588" slaves the
+# sensor to a PTP grandmaster (run ptp4l on the laptop NIC - see
+# docs/SYNCHRONIZATION.md).  "TIME_FROM_SYNC_PULSE_IN" uses a 1 PPS + NMEA
+# input.  Applying a mode re-initialises the sensor once at startup.
+LIDAR_TIMESTAMP_MODE = None
+
 # GNSS fixes arrive at ~1-10 Hz (device/mountpoint dependent) and are not
 # buffered with a strict on-device timestamp the way MTi/radar/lidar are;
 # this tolerance is only used by the *offline* synchronizer

@@ -51,6 +51,25 @@ def rpy_to_matrix(roll_deg=0.0, pitch_deg=0.0, yaw_deg=0.0) -> np.ndarray:
     return rz @ ry @ rx
 
 
+def matrix_to_rpy(R: np.ndarray) -> tuple[float, float, float]:
+    """Inverse of rpy_to_matrix (R = Rz(yaw) Ry(pitch) Rx(roll)); degrees."""
+    pitch = -np.arcsin(np.clip(R[2, 0], -1.0, 1.0))
+    if abs(R[2, 0]) < 1 - 1e-9:
+        roll = np.arctan2(R[2, 1], R[2, 2])
+        yaw = np.arctan2(R[1, 0], R[0, 0])
+    else:                                  # gimbal lock: fold roll into yaw
+        roll = 0.0
+        yaw = np.arctan2(-R[0, 1], R[1, 1])
+    return tuple(float(v) for v in np.degrees([roll, pitch, yaw]))
+
+
+def pose_to_params(sensor: str, T_vehicle_sensor: np.ndarray):
+    """(translation_m, rpy_deg) in the extrinsics.yaml convention (mount
+    rotation applied on top of the sensor's nominal axis mapping)."""
+    R_mount = T_vehicle_sensor[:3, :3] @ NOMINAL_ROTATION[sensor].T
+    return T_vehicle_sensor[:3, 3].copy(), matrix_to_rpy(R_mount)
+
+
 def make_transform(R: np.ndarray, t) -> np.ndarray:
     T = np.eye(4)
     T[:3, :3] = R

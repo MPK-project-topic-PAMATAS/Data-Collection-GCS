@@ -20,3 +20,6 @@ class LidarFrame:
     reflectivity: np.ndarray | None = None
     num_points: int = 0
     complete: bool = False
+    # First valid column timestamp from the SENSOR clock (ns).  Related to the
+    # host clock only when the sensor is PTP/PPS-synced (see timestamp_mode).
+    sensor_timestamp_ns: int = 0

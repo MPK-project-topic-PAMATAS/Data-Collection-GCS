@@ -165,3 +165,33 @@ def test_dataset_reader_reports_zero_lidar_frames_without_pcap(tmp_path):
     assert reader.num_lidar_frames == 0
     assert reader.lidar_frames() == []
     assert reader.get_lidar_frame(0) is None
+
+
+def test_apply_timestamp_mode_sets_only_when_different(monkeypatch):
+    from types import SimpleNamespace
+    from ouster.sdk import sensor
+    from ouster.sdk.core import TimestampMode
+    from lidar.receiver import apply_timestamp_mode
+
+    cfg = SimpleNamespace(timestamp_mode=TimestampMode.TIME_FROM_INTERNAL_OSC)
+    calls = []
+    monkeypatch.setattr(sensor, "get_config", lambda host, **k: cfg)
+    monkeypatch.setattr(sensor, "set_config",
+                        lambda host, c, **k: calls.append(c.timestamp_mode))
+
+    assert apply_timestamp_mode("h", None) == "TIME_FROM_INTERNAL_OSC"
+    assert calls == []
+    assert apply_timestamp_mode("h", "TIME_FROM_PTP_1588") == "TIME_FROM_PTP_1588"
+    assert calls == [TimestampMode.TIME_FROM_PTP_1588]
+    apply_timestamp_mode("h", "TIME_FROM_PTP_1588")   # already active: no re-init
+    assert len(calls) == 1
+
+
+def test_apply_timestamp_mode_rejects_unknown(monkeypatch):
+    import pytest
+    from types import SimpleNamespace
+    from ouster.sdk import sensor
+    from lidar.receiver import apply_timestamp_mode
+    monkeypatch.setattr(sensor, "get_config", lambda host, **k: SimpleNamespace(timestamp_mode=None))
+    with pytest.raises(ValueError):
+        apply_timestamp_mode("h", "BOGUS")

@@ -299,3 +299,34 @@ containing:
   four that's real: rewritten on **every** recording (not just when
   missing) from the live `RADAR_TO_CAMERA_OFFSET_M`, so each dataset
   records the offset actually in effect when it was captured.
+
+---
+
+## Extrinsic solvers (lidar, radar) — DE global search + least-squares polish
+
+`calibration/extrinsic_solvers.py` solves ONE sensor's pose in the vehicle
+frame in the same parametrisation as `extrinsics.yaml`, holding the others
+fixed. Each solve runs differential evolution inside tape-measure bounds from
+several seeds, polishes each with Levenberg-Marquardt, then reports the best
+pose, the seed-to-seed spread, a Jacobian 1-sigma, and any parameter pinned at
+its bound. Large spread or a parameter at a bound means the data do not
+constrain that DOF — fix it (`fixed=(...)`) or collect better poses.
+
+| Pair | Function | Data needed |
+|------|----------|-------------|
+| Lidar -> camera (target) | `solve_lidar_camera_correspondences` | 3-D lidar points (cutout-board hole centres/corners) + matching pixels, >= 6, many board poses 3-12 m |
+| Lidar -> camera (targetless) | `solve_lidar_camera_nid` | (lidar points, intensity, gray image) from city drives; lane markings/manholes give the edges |
+| Radar -> lidar | `solve_radar_lidar` | corner-reflector positions in both sensors (>= 4, varied range/azimuth); residuals in radar polar space |
+| Radar yaw | `solve_radar_yaw_from_doppler` | per-frame radial velocities + reference forward speed |
+
+CLI for the correspondence solvers (writes the yaml only when the result is
+trusted):
+
+```bash
+python calibration/solve_extrinsics.py lidar-camera --data board.npz --write
+python calibration/solve_extrinsics.py radar-lidar  --data refl.npz --range 0.2 0.2 0 0 0 8 --write
+```
+
+Not implemented: detecting the board holes/reflectors in the pcap, SVO2 and
+radar data to produce those `.npz` correspondences, and the MTi/GNSS-to-lidar
+hand-eye (use lidar odometry + a Kalibr/hand-eye tool for that pair).

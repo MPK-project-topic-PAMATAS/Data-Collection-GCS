@@ -130,6 +130,8 @@ def build_config_snapshot(camera_calib: dict | None, mti, radar, lidar, gnss,
         },
         "lidar": {
             "hostname": S.LIDAR_HOSTNAME,
+            "timestamp_mode_requested": S.LIDAR_TIMESTAMP_MODE,
+            "timestamp_mode_active": getattr(lidar, "timestamp_mode", None),
             "enabled": lidar is not None,
         },
         "gnss": {

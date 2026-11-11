@@ -48,6 +48,33 @@ There is **no hardware trigger or PTP** between devices — this is software
 timestamping at arrival; the acceptance windows below absorb the resulting
 USB/serial jitter.
 
+## Optional Ouster PTP / PPS timestamping and offset estimation
+
+The Ouster is the only sensor here that can take an external time source.
+Set `config.settings.LIDAR_TIMESTAMP_MODE` to `"TIME_FROM_PTP_1588"` (run
+`ptp4l` on the laptop NIC with the laptop as grandmaster, ideally with
+`chrony` disciplined by the MTi/GNSS 1PPS) or `"TIME_FROM_SYNC_PULSE_IN"`.
+`None` (default) leaves the sensor untouched. The mode is applied once at
+`LidarReceiver.start()` (the sensor re-initialises only if it differs), the
+active mode is recorded in the config snapshot (`lidar.timestamp_mode_active`),
+and each live `LidarFrame` carries `sensor_timestamp_ns` (sensor clock).
+Recorded `timestamp_ns` values are still host-arrival stamps; PTP makes the
+sensor clock comparable to the host clock, it does not rewrite them.
+
+The ZED 2 and AWR1843 have no sync input, so their latency is estimated
+offline from a recorded calibration drive:
+
+```bash
+python calibration/estimate_time_offsets.py output/ --session <SID> --out offsets.json
+```
+
+It cross-correlates |gyro| (ZED IMU vs MTi-8) and Doppler ego-speed vs MTi
+speed (radar), per whole session and per window (drift check). Subtract a
+sensor's offset from its timestamps to correct it. Low-confidence results
+(`[LOW]`) mean the drive lacked excitation (use accelerations and turns, not
+a constant-speed straight line). A large window-to-window spread is jitter
+that a constant offset cannot remove. Library code: `fusion/timesync.py`.
+
 ## Recording is per-sensor and native-rate
 
 Each sensor has its own recorder(s), started/stopped together by

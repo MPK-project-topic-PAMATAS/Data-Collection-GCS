@@ -31,7 +31,36 @@ from collections import deque
 import numpy as np
 
 from lidar.frame import LidarFrame
-from config.settings import LIDAR_HOSTNAME, LIDAR_STREAM_TIMEOUT_NS
+from config.settings import (
+    LIDAR_HOSTNAME, LIDAR_STREAM_TIMEOUT_NS, LIDAR_TIMESTAMP_MODE,
+)
+
+
+def apply_timestamp_mode(hostname: str, mode: str | None) -> str | None:
+    """Set the sensor's timestamp source and return the mode now active.
+
+    ``mode`` is a ``TimestampMode`` member name; None leaves the sensor
+    untouched (returns its current mode).  Only ``timestamp_mode`` is
+    changed - every other active setting is written back as read - and the
+    sensor is only re-initialised when the mode actually differs.
+    """
+    from ouster.sdk import sensor
+    from ouster.sdk.core import TimestampMode
+
+    cfg = sensor.get_config(hostname)
+    if mode is not None:
+        try:
+            want = TimestampMode.__members__[mode]
+        except KeyError:
+            raise ValueError(
+                f"unknown Ouster timestamp mode {mode!r}; expected one of "
+                f"{sorted(TimestampMode.__members__)}") from None
+        if cfg.timestamp_mode != want:
+            cfg.timestamp_mode = want
+            sensor.set_config(hostname, cfg)
+            cfg = sensor.get_config(hostname)
+    tm = cfg.timestamp_mode
+    return getattr(tm, "name", str(tm))
 
 
 class LidarReceiver:
@@ -64,6 +93,7 @@ class LidarReceiver:
         self._pcap_packets = 0
         self._sensor_name = hostname or LIDAR_HOSTNAME
         self._diagnosed = False
+        self._timestamp_mode: str | None = None
 
     # ── lifecycle ────────────────────────────────────────────────────
 
@@ -73,6 +103,17 @@ class LidarReceiver:
 
         # A single live URL returns the SDK's ``Singler`` wrapper.  Its
         # ``single_iter(0)`` method is the supported iterable interface.
+        try:
+            self._timestamp_mode = apply_timestamp_mode(
+                self._hostname, LIDAR_TIMESTAMP_MODE)
+            print(f"[lidar] timestamp mode: {self._timestamp_mode}")
+            if self._timestamp_mode == "TIME_FROM_INTERNAL_OSC":
+                print("[lidar] sensor clock is free-running; lidar stamps are "
+                      "host-arrival only (set LIDAR_TIMESTAMP_MODE for PTP/PPS)")
+        except Exception as exc:
+            if LIDAR_TIMESTAMP_MODE is not None:
+                raise   # a requested sync mode that fails must not go unnoticed
+            self._record_error(f"could not read timestamp mode: {exc}")
         self._source = sdk.open_source([self._hostname], collate=True)
         self._info = self._source.sensor_info[0]
         try:
@@ -158,6 +199,7 @@ class LidarReceiver:
             reflectivity=reflect,
             num_points=int(points_full.shape[0]),
             complete=bool(lf.complete()),
+            sensor_timestamp_ns=_sensor_ts(lf),
         )
 
         with self._lock:
@@ -290,6 +332,11 @@ class LidarReceiver:
         return self._info
 
     @property
+    def timestamp_mode(self) -> str | None:
+        """Active Ouster timestamp source name, or None before start()."""
+        return self._timestamp_mode
+
+    @property
     def sensor_name(self) -> str:
         return self._sensor_name
 
@@ -322,6 +369,16 @@ class LidarReceiver:
         if self._thread:
             self._thread.join(timeout=3)
         self.stop_pcap()
+
+
+def _sensor_ts(lf) -> int:
+    """First nonzero per-column timestamp (sensor clock, ns); 0 if unavailable."""
+    try:
+        ts = np.asarray(lf.timestamp)
+        nz = ts[ts > 0]
+        return int(nz[0]) if nz.size else 0
+    except Exception:
+        return 0
 
 
 def _xyzi_from_frame(lf, xyz_lut):
