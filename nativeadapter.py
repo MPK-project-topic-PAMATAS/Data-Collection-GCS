@@ -79,13 +79,17 @@ def _to_radar_frame(nf):
     gracefully fall back to an empty RadarData(), matching the Python receiver
     which returns None from get_nearest when its buffer is empty.
     """
-    if nf.range_doppler is None or nf.range_doppler.size == 0:
+    if nf.range_doppler is None:
+        return None
+    # Accept any array-like (the binding yields numpy arrays; synthetic frames
+    # may use lists), mirroring _to_lidar_frame.
+    range_doppler = np.asarray(nf.range_doppler, dtype=np.uint16)
+    if range_doppler.size == 0:
         return None
     _ensure_frame()
     points = [_PyRadarPoint(x=p.x, y=p.y, z=p.z, velocity_mps=p.velocity_mps)
               for p in nf.points]
-    range_doppler = np.asarray(nf.range_doppler, dtype=np.uint16).reshape(
-        nf.num_range_bins, nf.num_doppler_bins)
+    range_doppler = range_doppler.reshape(nf.num_range_bins, nf.num_doppler_bins)
     range_profile = np.asarray(nf.range_profile, dtype=np.float32)
     return _PyRadarFrame(
         points=points,
